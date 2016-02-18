@@ -1,0 +1,323 @@
+---
+title: "Vartiation between participants/items"
+output:
+  html_document:
+    fig_caption: yes
+    keep_md: yes
+    number_sections: yes
+    toc: yes
+    dev: svg
+word_document:
+    fig_caption: yes
+    fig_height: 5
+    fig_width: 9
+---
+
+
+```{r echo=F}
+echo=F
+```
+
+```{r echo=echo, message=F, warning=F}
+# Imports
+library(dplyr)
+library(ggplot2)
+library(scales)
+library(tidyr)
+library(readr)
+library(lme4)
+library(magrittr)
+source('Functions.R')
+
+fig_format = 'svg'
+
+# Colours
+green = "#4daf4a"
+red = "#e41a1c"
+blue = "#377eb8"
+blue2 = "#37B8B2"
+black = '#000000'
+
+data = read_csv('data/long.csv')
+
+## Force charachter columns to factors
+i <- sapply(data, is.character)
+data[i] <- lapply(data[i], as.factor)
+
+data$is.original.item = factor(data$stimuli_number < 3)
+levels(data$is.original.item) = c('New CRT-Long items', 'Original CRT items')
+data$subject_nr = factor(data$subject_nr)
+levels(data$subject_nr) = 1:length(levels(data$subject_nr))
+data$stimuli_number %<>% factor
+data$acc = data$acc == 'True'
+data$seconds = data$step / 1000
+
+## Lose the distinction between the two "other" responses
+levels(data$choice) = c('correct', 'heuristic', 'other', 'other')
+levels(data$section) = c('correct', 'heuristic', 'other', 'other')
+
+data$biased = factor(data$bias > .6)
+# levels(data$biased) = c('Unbiased', 'Biased')
+levels(data$biased) = c('Minority heuristic', 'Majority heuristic')
+levels(data$stimuli_number) = c('1. Bat-and-ball',
+								'2. Widgets',
+								'3. Lily pad',
+								'4. Coin',
+								'5. Elves',
+								'6. Running track',
+								'7. Grades',
+								'8. Athletics team')
+
+## Currently using every 5th sample (100 msec intervals)
+## Change this in preprocess.py as necessary
+## Optionally, make the data even sparser here
+# show_every = 2
+show_every = 5 # Sparser data for supplementary plots
+if(show_every > 1){
+  steps = unique(data$step)
+  sparse_steps = steps[seq(1, length(steps), show_every)]
+  data = data[data$step %in% sparse_steps,]
+}
+# unique(data$step) %>% head
+
+# Seperate column for each response region status
+for(r in c('correct', 'heuristic', 'other')){
+  data[[r]] = data$section == r
+}
+tall.data = data %>%
+  select(subject_nr, trial, seconds, choice, condition, stimuli_number, bias, biased,
+         correct, heuristic, other, is.original.item) %>%
+  gather(section, value, correct, heuristic, other)
+
+# The column 'other' is the sum of fixations on both possible foil responses.
+# This is a problem where we want to think about the *probability* of
+# moving towards a foil response, as this combines the probability of going towards either.
+# Therefore, for every row corresponding to movement towards a foil,
+# I add an extra, identical row to the data, where the foil response
+# ISN'T being moved towards.
+# Think of this as multiplying to demoninator by 2:
+# instead of moving towards either foil on 50/100 trials,
+# it's 50/200 trials, so the probability of moving towards a foil response is 25%
+filler.data = filter(tall.data, section=='other')
+filler.data$value = FALSE
+
+filler.data$is.filler = T # Use this later when excluding these rows
+tall.data$is.filler = F
+
+tall.data = rbind(tall.data, filler.data)
+tall.data$value = tall.data$value * 1 # Coerces values to 1,0 rather than T,F
+tall.data %<>% mutate(to.chosen = section == choice)
+
+# Add orthogonal (ot) and natural (nt) polynomial terms for time to the data
+order = 4
+ot = poly(tall.data$seconds, order, raw=F) # Orthogonal
+nt = poly(tall.data$seconds, order, raw=T) # Natural
+for (i in 1:order){
+  tall.data[paste("ot", i, sep="")] = ot[,i]
+  tall.data[paste("nt", i, sep="")] = nt[,i]
+}
+scale.to.1 = function(x) x / max(x)
+tall.data$ot1 %<>% scale.to.1
+tall.data$ot2 %<>% scale.to.1
+tall.data$ot3 %<>% scale.to.1
+
+tall.data$nt1 %<>% scale.to.1
+tall.data$nt2 %<>% scale.to.1
+tall.data$nt3 %<>% scale.to.1
+
+conflict = tall.data[tall.data$condition=='C',]
+control = tall.data[tall.data$condition=='B',]
+
+tall.data %<>% mutate(type = interaction(condition, section))
+# "B.correct"   "C.correct"   "B.heuristic" "C.heuristic" "B.other"     "C.other"
+levels(tall.data$type) = c('Correct no-conflict', 'Correct conflict', 'Foil no-conflict',
+						   'Heuristic Conflict', 'Foil no-conflict', 'Foil conflict')
+tall.data$type %<>% factor(levels=levels(.)[c(1, 4, 2, 3, 5)])
+# levels(tall.data$biased) = c('Unbiased reasoners', 'Biased reasoners')
+levels(tall.data$biased) = c('Minority heuristic', 'Majority heuristic')
+conflict$Section = conflict$section
+levels(conflict$Section) = c('Correct', 'Heuristic', 'Foil')
+levels(control$section) = c('Correct', 'Foil', 'Foil')
+
+
+# Define text sizes for plotting here, and resuse below
+my_theme = theme(title = element_text(size = rel(1)),
+                 axis.title = element_text(size = rel(1)),
+                 axis.text = element_text(size = rel(.9)),
+                 legend.title = element_text(size = rel(.9)),
+                 legend.text = element_text(size = rel(.9)),
+				 legend.background = element_rect(fill=NA))
+```
+
+
+
+```{r echo=echo, all.plot.all, dev=fig_format, fig.width=9, fig.height=5, fig.cap='Figure 3. Proportion of mouse cursors in the region of the screen corresponding to each response options, over time, for conflict and no-conflict problems.'}
+# Pixel size of 635 x 350
+all.plot = ggplot(tall.data,
+     aes(seconds, value, color=type, alpha=type)) +
+	stat_summary(fun.data=mean_se) +
+	theme_bw() + scale_color_manual(values=c(blue2, red, green, blue, black)) +
+	# scale_alpha_manual(values=c(.7, .7, .7, .3, .3)) +
+	scale_alpha_manual(values=c(1, 1, 1, .5, .5)) +
+  labs(
+	# labs(x="Seconds", y="Proportion of trials",
+		 colour="Response region", alpha="Response region") +
+	scale_y_continuous(labels=percent) +
+	scale_x_continuous(breaks=seq(0, 60, 5)) +
+	my_theme
+all.plot + theme(legend.position=c(0,1), legend.justification=c(0,1)) +
+	coord_cartesian(ylim=c(0,.92))
+```
+
+```{r echo=echo, all.plot.items, dev=fig_format, fig.width=9, fig.height=6, fig.cap='Figure 3B. Figure 3, plotted separately for each problem.'}
+all.plot + facet_wrap(~stimuli_number, ncol=3) +
+	theme(legend.position=c(.66,.33),
+		  legend.justification=c(0,1))
+```
+
+```{r echo=echo, all.plot.bias, dev=fig_format, fig.width=9, fig.height=5, fig.cap='Figure 3C. Figure 3, plotted separately for minority heuristic and majority heuristic participants.'}
+all.plot + facet_wrap(~biased) +
+	theme(legend.position=c(1,.5),
+		  legend.justification=c(1,.5))
+```
+
+```{r echo=echo, all.to_chosen, dev=fig_format}
+this.data = dplyr::filter(tall.data,
+                          choice=='correct' |
+                            (condition=='C' & choice=='heuristic'))
+this.data = this.data[this.data$to.chosen,]
+this.data$type = interaction(this.data$condition, this.data$choice) %>%
+  droplevels
+levels(this.data$type) = c('Correct no-conflict', 'Correct conflict',
+                           'Heuristic conflict')
+this.data$type %<>% factor(levels = levels(.)[c(3,1,2)])
+```
+
+```{r echo=echo, conflict.to_chosen, dev=fig_format}
+conflict.d = filter(this.data, condition=='C' & choice!='other')
+conflict.d$section %<>% droplevels
+conflict.d$Section = conflict.d$section
+levels(conflict.d$Section) = c('Correct conflict', 'Heuristic conflict')
+```
+
+```{r echo=echo, conflict.to_chosen.plot, dev=fig_format, fig.width=9, fig.height=5, fig.cap='Figure 4 (comparison 1). Proportion of mouse cursors in the region of the response option which was ultimately selected on that trial, comparing heuristic and correct responses on conflict problems.'}
+conflict.to_chosen.plot = ggplot(conflict.d, aes(seconds, value, color=type)) +
+  stat_summary(fun.data=mean_se) +
+  labs(
+  # labs(title="To chosen response - Conflict problems",
+       x="Seconds", y="Proportion of trials", colour="Response region") +
+  theme_bw() +
+  scale_color_manual(values=c(red, green)) +
+  my_theme + scale_y_continuous(labels=percent, breaks=seq(.25, 1.01, .25)) +
+  scale_x_continuous(breaks=seq(0, 60, 5))
+conflict.to_chosen.plot +
+  theme(legend.position=c(0,1), legend.justification=c(0,1))
+```
+
+```{r echo=echo, conflict.to_chosen.plot.items, dev=fig_format, fig.width=9, fig.height=6, fig.cap='Figure 4B (comparison 1). Figure 4 (comparison 1) plotted separately for each problem.'}
+conflict.to_chosen.plot + facet_wrap(~stimuli_number, ncol=3) +
+  theme(legend.position=c(.66,.33),
+        legend.justification=c(0,1))
+```
+
+```{r echo=echo, conflict.to_chosen.plot.bias, dev=fig_format, fig.width=9, fig.height=5, fig.cap='Figure 4C (comparison 1). Figure 4 (comparison 1) plotted separately for unbiased and biased participants.'}
+conflict.to_chosen.plot + facet_wrap(~biased) +
+  theme(legend.position=c(1,0), legend.justification=c(1,0))
+```
+
+```{r echo=echo, intuitive.to_chosen.plot, dev=fig_format, fig.width=9, fig.height=5, fig.cap='Figure 4 (comparison 2). Proportion of mouse cursors in the region of the response option which was ultimately selected on that trial, comparing heuristic on conflict problems to correct responses on no-conflict problems.'}
+
+intuitive.d = filter(this.data,
+                     (choice=='correct' & condition=='B') |
+                       (choice=='heuristic' & condition=='C'))
+intuitive.d$type %<>% droplevels
+contrasts(intuitive.d$type) = c(-.5, .5)
+
+intuitive.to_chosen.plot = ggplot(intuitive.d, aes(seconds, value, color=type)) +
+  stat_summary(fun.data=mean_se, alpha=.6) +
+  labs(
+  # labs(title="To chosen response - Intuitively-cued responses",
+       x="Seconds", y="Proportion of trials", colour="Response region") +
+  theme_bw() +
+  scale_color_manual(values=c(red, blue2)) +
+  my_theme + scale_y_continuous(labels=percent, breaks=seq(.25, 1.01, .25)) +
+  scale_x_continuous(breaks=seq(0, 60, 5))
+intuitive.to_chosen.plot +
+  theme(legend.position=c(1,0), legend.justification=c(1,0))
+```
+
+```{r echo=echo, intuitive.to_chosen.plot.items, dev=fig_format, fig.width=9, fig.height=6, fig.cap='Figure 4B (comparison 2). Figure 4 (comparison 2) plotted separately for each problem.'}
+intuitive.to_chosen.plot + facet_wrap(~stimuli_number, ncol=3) +
+  theme(legend.position=c(.66,.33),
+        legend.justification=c(0,1))
+```
+
+```{r echo=echo, intuitive.to_chosen.plot.items2, dev=fig_format, fig.width=9, fig.height=5, fig.cap='Figure 4C (comparison 2). Figure 4 (comparison 2) plotted separately for the original and new CRT problems.'}
+intuitive.to_chosen.plot + facet_wrap(~is.original.item, ncol=3) +
+  theme(legend.position=c(1,0), legend.justification=c(1,0))
+```
+
+```{r echo=echo, intuitive.to_chosen.plot.bias, dev=fig_format, fig.width=9, fig.height=5, fig.cap='Figure 4D (comparison 2). Figure 4 (comparison 2) plotted separately for unbiased and biased participants.'}
+intuitive.to_chosen.plot + facet_wrap(~biased) +
+  theme(legend.position=c(1,0), legend.justification=c(1,0))
+```
+
+
+```{r echo=echo, dev=fig_format, fig.width=9, fig.height=9}
+not.chosen = conflict[conflict$to.chosen==F,]
+not.chosen = not.chosen[not.chosen$choice!='other',]
+
+correct.choices = not.chosen[not.chosen$choice=='correct',]
+heuristic.choices = not.chosen[not.chosen$choice=='heuristic',]
+```
+
+```{r echo=echo, correct.not_chosen.plot, dev=fig_format, fig.width=9, fig.height=5, fig.cap="Figure 5. Proportion of trials in the region of each option, over time, for trials in which the correct option was eventually chosen. Error bars show standard error of measurement. Lines show fitted polynomial regression curves. Participants were more likely to be in the region of the heuristic response from around 10 seconds onwards."}
+correct.not_chosen.plot = ggplot(correct.choices,
+                                 aes(seconds, value, color=Section)) +
+  stat_summary(fun.data=mean_se) +
+  labs(
+  # labs(title="To non-chosen response\n(when chosing correct one)",
+       x="Seconds", y="Proportion of trials", color="Response region") +
+  theme_bw() +
+  scale_color_manual(values=c(red, blue)) +
+  scale_y_continuous(labels=percent) +
+  scale_x_continuous(breaks=seq(0, 60, 5)) +
+  my_theme
+correct.not_chosen.plot + theme(legend.position=c(1,1), legend.justification=c(1,1))
+```
+
+```{r echo=echo, correct.not_chosen.plot.items, dev=fig_format, fig.width=9, fig.height=6, fig.cap='Figure 5B. Figure 5 plotted separately for each problem.'}
+correct.not_chosen.plot + facet_wrap(~stimuli_number, ncol=3) +
+  theme(legend.position=c(.66,.33),
+        legend.justification=c(0,1))
+```
+
+```{r echo=echo, correct.not_chosen.plot.bias, dev=fig_format, fig.width=9, fig.height=5, fig.cap='Figure 5C. Figure 5 plotted separately for unbiased and biased participants.'}
+correct.not_chosen.plot + facet_wrap(~biased) +
+  theme(legend.position=c(1,1), legend.justification=c(1,1))
+```
+
+```{r echo=echo, heuristic.not_chosen.plot, dev=fig_format, fig.width=9, fig.height=5, fig.cap='Figure 6. Proportion of trials in the region of each option, over time, for trials in which the intuitive option was eventually chosen. Participants were less or equally likely to be in the region of the correct option than a foil throughout.'}
+heuristic.not_chosen.plot = ggplot(heuristic.choices,
+                                   aes(seconds, value, color=Section)) +
+  stat_summary(fun.data=mean_se) +
+  labs(
+  # labs(title="To non-chosen response\n(when chosing heuristic one)",
+       x="Seconds", y="Proportion of trials", color="Response region") +
+  theme_bw() +
+  scale_color_manual(values=c(green, blue)) +
+  my_theme + scale_y_continuous(labels=percent)
+heuristic.not_chosen.plot +
+  theme(legend.position=c(1,1), legend.justification=c(1,1))
+```
+
+```{r echo=echo, heuristic.not_chosen.plot.items, dev=fig_format, fig.width=9, fig.height=6, fig.cap='Figure 6B. Figure 6 plotted separately for each problem.'}
+heuristic.not_chosen.plot + facet_wrap(~stimuli_number, ncol=3) +
+  theme(legend.position=c(.66,.33),
+        legend.justification=c(0,1))
+```
+
+```{r echo=echo, heuristic.not_chosen.plot.bias, dev=fig_format, fig.width=9, fig.height=5, fig.cap='Figure 6C. Figure 6 plotted separately for unbiased and biased participants.'}
+heuristic.not_chosen.plot + facet_wrap(~biased) +
+  theme(legend.position=c(1,1), legend.justification=c(1,1))
+```

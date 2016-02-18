@@ -1,0 +1,328 @@
+---
+output:
+  title: "By trial analysis"
+  html_document:
+    keep_md: yes
+    self_contained: no
+  pdf_document: default
+---
+
+Data was excluded from 3 subjects who hadn't completed the experiment within the 15 minutes allocated,
+and 7 trials with response times greater than 100 seconds were discarded (.6% of the total).
+
+```{r imports, message=FALSE, warning=TRUE, error=TRUE, results='markup'}
+library(multcomp)
+library(lme4)
+library(lmerTest)
+library(dplyr)
+library(pander)
+library(ggplot2)
+library(tidyr)
+library(scales)
+library(magrittr)
+source('HelperFunctions.R')
+
+data = read.csv('data/processed.csv')
+
+data$subject_nr %<>% factor
+levels(data$subject_nr) = 1:length(levels(data$subject_nr))
+
+data$acc = as.numeric(data$acc == 'True') # Python to R
+# Coding levels
+levels(data$condition) = c("baseline", "conflict")
+data$choice.full = data$choice # Keep distinction between two 'other' responses
+levels(data$choice) = c("correct", "heuristic", "other", "other") # Drop distinction
+data$question = substr(data$code, 2, 3)
+
+b = data %>% group_by(subject_nr) %>% summarise(bias=mean(bias))
+ggplot(b, aes(bias)) +
+	geom_histogram(binwidth=.125) +
+	scale_x_continuous(breaks=seq(0,1,.25)) +
+	geom_vline(xintercept=.7, color=red)
+mean(b$bias > .6) # Proportion of subjects who are 'biased'
+sum(b$bias > .6)
+sum(b$bias < .6)
+data$biased = data$bias > .6
+
+# Pretty plotting information
+data$Condition = data$condition
+data$Choice = data$choice
+levels(data$Condition) = c("Baseline questions", "Conflict questions")
+levels(data$Choice) = c("Correct", "Heuristic", "Other")
+green = "#4daf4a"
+red = "#e41a1c"
+blue = "#377eb8"
+
+# By condition
+baseline = filter(data, condition=='baseline')
+conflict = filter(data, condition=='conflict')
+```
+
+
+## Responses
+
+```{r results='asis'}
+# Proportion of each response given, by condition
+with(data, table(Condition, Choice)) %>%
+	prop.table(1) %>%
+	{. * 100} %>%
+	round(2) %>%
+	md.table
+```
+
+```{r results='asis'}
+# Proportion of each response given, by problem
+# (C=conflict, B=baseline/no-conflict)
+with(data, table(code, choice.full)) %>%
+	prop.table(1) %>%
+	{. * 100} %>%
+	round(2) %>%
+	md.table
+```
+
+
+## Question 1
+For conflict problems, do correct and heuristic responses differ?
+
+```{r warning=F, results='asis'}
+conflict.data = filter(data, condition=='conflict', choice != 'other')
+conflict.data$choice %<>% relevel(ref='heuristic')
+
+conflict.table = conflict.data %>%
+	group_by(choice) %>%
+	summarise(RT=mean.sd(rt), # Response time
+			  Path.length=mean.sd(path_length), # Length of path travelled by cursor
+			  Proximity=mean.sd(proximity_to_other), 
+			    # How close cursor went to non-chosen option
+			  	# (heuristic option for correct responses, and vice versa)
+			  Movements=mean.sd(movements),
+			  N=n())
+
+m.rt = lmer(log(rt) ~ choice +
+				(1|subject_nr) + (1|stimuli_number),
+			data = conflict.data)
+# summary(m.rt)
+coef.table(m.rt)
+this.ci(m.rt) %>% md.table
+
+m.path_length = lmer(log(path_length) ~ choice +
+					 	(1|subject_nr) + (1|stimuli_number),
+					 data = conflict.data)
+# summary(m.path_length)
+coef.table(m.path_length)
+this.ci(m.path_length) %>% md.table
+
+m.prox = lmer(proximity_to_other ~ choice +
+				(1|subject_nr) + (1|stimuli_number),
+			data = conflict.data)
+# summary(m.prox)
+coef.table(m.prox)
+this.ci(m.prox) %>% md.table
+
+m.movements = glmer(movements ~ choice + (1|subject_nr) + (1|stimuli_number),
+					data = conflict.data, family='poisson')
+coef.table(m.movements)
+this.ci(m.movements) %>% md.table
+
+models = c(m.rt, m.path_length, m.prox, m.movements)
+get.p = function(model){
+	coefs = coef(summary(model)) %>% round(3)
+	return( coefs[2,ncol(coefs)] )
+}
+p.vals = sapply(models, get.p)
+
+
+conflict.table[3,2:5] = p.vals
+conflict.table$choice %<>% as.character
+conflict.table[3,c(1,6)] = c('p', '')
+conflict.table %>%
+	md.table()
+
+```
+
+## Question 2
+
+Are heuristically-cued responses to conflict problems different to those to baseline problems?
+
+```{r warning=F, results='asis'}
+heuristic.data = filter(data, (condition=='conflict' & choice=='heuristic') |
+							(condition=='baseline' & choice=='correct'))
+
+heuristic.data$choice %<>% droplevels %>% relevel(ref='correct')
+contrasts(heuristic.data$choice) = c(-.5, .5)
+
+heuristic.table = heuristic.data %>%
+	group_by(choice) %>%
+	summarise(RT=mean.sd(rt), # Response time
+			  Path.length=mean.sd(path_length), # Length of path travelled by cursor
+			  Movements = mean.sd(movements),
+			  N=n())
+
+
+m.rt = lmer(log(rt) ~ choice +
+				(1|subject_nr) + (1|stimuli_number),
+			data = heuristic.data)
+# summary(m.rt)
+coef.table(m.rt)
+this.ci(m.rt) %>% md.table
+
+m.path_length = lmer(log(path_length) ~ choice +
+					 	(1|subject_nr) + (1|stimuli_number),
+					 data = heuristic.data)
+# summary(m.path_length)
+coef.table(m.path_length)
+this.ci(m.path_length) %>% md.table
+
+m.movements = glmer(movements ~ choice + (1|subject_nr) + (1|stimuli_number),
+					data = heuristic.data, family='poisson')
+# summary(m.path_length)
+coef.table(m.movements)
+this.ci(m.movements) %>% md.table
+
+models = c(m.rt, m.path_length, m.movements)
+get.p = function(model){
+	coefs = coef(summary(model)) %>% round(3)
+	return( coefs[2,ncol(coefs)] )
+}
+p.vals = sapply(models, get.p)
+
+
+heuristic.table[3,2:4] = p.vals
+heuristic.table$choice %<>% as.character
+heuristic.table[3,c(1,5)] = c('p', '')
+heuristic.table %>%
+	md.table()
+```
+
+Modelling RT with full random effects (supplamentary materials)
+
+```{r}
+# For p values, use lmerTest model
+m.rt = lmerTest::lmer(log(rt) ~ choice +
+                        (1|subject_nr) + (choice|stimuli_number),
+                      data = heuristic.data)
+summary(m.rt)
+```
+
+```{r, results='asis'}
+library(arm)
+# For random effects, use lme4 model
+m.rt = lme4::lmer(log(rt) ~ choice +
+                    (1|subject_nr) + (choice|stimuli_number),
+                  data = heuristic.data)
+
+random.fx = coef(m.rt)$stimuli_number %>% data.frame
+random.fx.se = se.ranef(m.rt)$stimuli_number %>% data.frame
+
+names(random.fx) = c('intercept', 'condition')
+names(random.fx.se) = c('intercept', 'condition')
+
+random.fx$intercept.se = random.fx.se$intercept
+random.fx$condition.se = random.fx.se$condition
+
+random.fx %<>% mutate(lower = condition - 2*condition.se,
+                      upper = condition + 2*condition.se)
+random.fx$level = c('1. Bat-and-ball',
+                    '2. Widgets',
+    								'3. Lily pad',
+    								'4. Coin',
+	    							'5. Elves',
+			    					'6. Running track',
+					    			'7. Grades',
+						    		'8. Athletics team')
+
+# Output as table
+out = random.fx %>% dplyr::select(level, intercept, condition, lower, upper)
+out$condition %<>% exp
+out$lower %<>% exp
+out$upper %<>% exp
+names(out) = c('Problem', 'Control RT', 'Condition effect', 'Lower', 'Upper')
+md.table(out)
+```
+
+```{r random_effects_rt, fig.width=8, fig.height=6, dev='svg'}
+ggplot(random.fx,
+       aes(exp(intercept)/1000,
+           exp(condition)-1,
+           ymax=exp(upper)-1, ymin=exp(lower)-1)) +
+  geom_point(size=4) +
+  geom_errorbar() +
+  geom_text(aes(x=.5+exp(intercept)/1000, label=level, angle=90)) +
+  labs(x='No-conflict RT (Seconds)', y='Change in RT for conflict problems') +
+  scale_y_continuous(labels=percent) +
+  geom_hline(aes(yintercept=0), linetype='dashed') +
+  theme_bw()
+
+```
+
+
+### What if I include bias as a predictor?
+
+```{r warning=F, results='asis'}
+
+heuristic.data %<>% mutate(is.biased = factor(bias > .6))
+contrasts(heuristic.data$is.biased) = c(-.5, .5)
+
+# Don't include participants with 0 heuristic responses in this analysis
+# sum(b$bias == 0) # Number of participants to be left out here
+d = filter(heuristic.data, bias != 0)
+
+m.rt.bias = lmer(log(rt) ~ choice*is.biased +
+				(1|subject_nr) + (1|stimuli_number),
+			data = d)
+coef.table(m.rt.bias)
+this.ci(m.rt.bias) %>% md.table
+
+m.path_length.bias = lmer(log(path_length) ~ choice*is.biased +
+					 	(1|subject_nr) + (1|stimuli_number),
+					 data = d)
+coef.table(m.path_length.bias)
+this.ci(m.path_length.bias) %>% md.table
+
+m.movements.bias = glmer(movements ~ choice*is.biased + (1|subject_nr) + (1|stimuli_number),
+					data = d, family='poisson')
+coef.table(m.movements.bias)
+this.ci(m.movements.bias) %>% md.table
+```
+
+
+### Extremely biased/unbiased reasoners
+
+```{r warning=F, results='asis'}
+extreme.bias.data = filter(heuristic.data, bias == 1 | bias == .25)
+b = data %>% group_by(subject_nr) %>%
+	summarise(bias=mean(bias))
+sum(b$bias==1)
+sum(b$bias==.25)
+
+# biased.heuristic.data = heuristic.data[heuristic.data$bias==1,]
+# length(unique(biased.heuristic.data$subject_nr))
+
+g = extreme.bias.data %>%
+	group_by(is.biased, condition)
+g %>%
+  summarise_each(funs(mean.sd), rt, path_length) %>% md.table
+g %>%
+  summarise(n()) %>% data.frame %>% md.table
+# 	summarise(RT=mean.sd(rt), # Response time
+# 			  Path.length=mean.sd(path_length), # Length of path travelled by cursor
+# 			  N=n()) %>% md.table
+
+m.rt.biased = lmer(log(rt) ~ choice*is.biased +
+				(1|subject_nr) + (1|stimuli_number),
+			data = extreme.bias.data)
+coef.table(m.rt.biased)
+# this.ci(m.rt.biased) %>% md.table
+
+m.path_length.biased = lmer(log(path_length) ~ choice*is.biased +
+					 	(1|subject_nr) + (1|stimuli_number),
+					 data = extreme.bias.data)
+coef.table(m.path_length.biased)
+this.ci(m.path_length.biased) %>% md.table
+
+m.movements.biased = glmer(movements ~ choice*is.biased +
+						   	(1|subject_nr) + (1|stimuli_number),
+					data = extreme.bias.data, family='poisson')
+coef.table(m.movements.biased)
+# this.ci(m.movements.biased) %>% md.table
+```

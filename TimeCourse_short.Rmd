@@ -1,0 +1,473 @@
+---
+output:
+  html_document:
+    keep_md: yes
+    number_sections: yes
+    self_contained: no
+    toc: yes
+---
+
+
+```{r message=F, warning=F}
+# Imports
+library(dplyr)
+library(ggplot2)
+library(scales)
+library(tidyr)
+library(readr)
+library(lme4)
+library(magrittr)
+source('Functions.R')
+
+# fig_format = 'svg'
+fig_format = 'png'
+
+# Set to F to read values from file, or T to rerun all calculations (takes 20+ minutes)
+recalculate_everything = F
+
+# Colours
+green = "#4daf4a"
+red = "#e41a1c"
+blue = "#377eb8"
+blue2 = "#37B8B2"
+black = '#000000'
+
+data = read_csv('data/long.csv')
+
+## Force charachter columns to factors
+i <- sapply(data, is.character)
+data[i] <- lapply(data[i], as.factor)
+
+data$subject_nr = factor(data$subject_nr)
+levels(data$subject_nr) = 1:length(levels(data$subject_nr))
+data$stimuli_number = factor(data$stimuli_number)
+data$acc = data$acc == 'True'
+data$seconds = data$step / 1000
+
+## Lose the distinction between the two "other" responses
+levels(data$choice) = c('correct', 'heuristic', 'other', 'other')
+levels(data$section) = c('correct', 'heuristic', 'other', 'other')
+
+
+# To split the 'bias' measure into groups, I compare people give 3 or 4 heuristic responses,
+# to those who give 0, 1, or 2.
+b = data %>% group_by(subject_nr) %>% summarise(bias=mean(bias))
+# mean(b$bias > .6) # Proportion of subjects who are 'biased'
+sum(b$bias==.25) + sum(b$bias==.5) # Number of unbiased reasoners
+sum(b$bias>.6) # Number of biased reasoners
+data$biased = data$bias > .6
+
+## Currently using every 5th sample (100 msec intervals)
+## Change this in preprocess.py as necessary
+## Optionally, make the data even sparser here
+show_every = 2
+if(show_every > 1){
+  steps = unique(data$step)
+  sparse_steps = steps[seq(1, length(steps), show_every)]
+  data = data[data$step %in% sparse_steps,]
+}
+unique(data$step) %>% head
+
+# Seperate column for each response region status
+for(r in c('correct', 'heuristic', 'other')){
+  data[[r]] = data$section == r
+}
+
+tall.data = data %>%
+  select(subject_nr, trial, seconds, choice, condition, stimuli_number, bias, biased,
+         correct, heuristic, other) %>%
+  gather(section, value, correct, heuristic, other)
+
+# The column 'other' is the sum of fixations on both possible foil responses.
+# This is a problem where we want to think about the *probability* of 
+# moving towards a foil response, as this combines the probability of going towards either.
+# Therefore, for every row corresponding to movement towards a foil,
+# I add an extra, identical row to the data, where the foil response
+# ISN'T being moved towards.
+# Think of this as multiplying to demoninator by 2:
+# instead of moving towards either foil on 50/100 trials,
+# it's 50/200 trials, so the probability of moving towards a foil response is 25%
+filler.data = filter(tall.data, section=='other')
+filler.data$value = FALSE
+
+filler.data$is.filler = T # Use this later when excluding these rows
+tall.data$is.filler = F
+
+tall.data = rbind(tall.data, filler.data)
+tall.data$value = tall.data$value * 1 # Coerces values to 1,0 rather than T,F
+tall.data %<>% mutate(to.chosen = section == choice)
+
+# Add orthogonal (ot) and natural (nt) polynomial terms for time to the data
+order = 4
+ot = poly(tall.data$seconds, order, raw=F) # Orthogonal
+nt = poly(tall.data$seconds, order, raw=T) # Natural
+for (i in 1:order){
+  tall.data[paste("ot", i, sep="")] = ot[,i]
+  tall.data[paste("nt", i, sep="")] = nt[,i]
+}
+scale.to.1 = function(x) x / max(x)
+tall.data$ot1 %<>% scale.to.1
+tall.data$ot2 %<>% scale.to.1
+tall.data$ot3 %<>% scale.to.1
+
+tall.data$nt1 %<>% scale.to.1
+tall.data$nt2 %<>% scale.to.1
+tall.data$nt3 %<>% scale.to.1
+
+conflict = tall.data[tall.data$condition=='C',]
+control = tall.data[tall.data$condition=='B',]
+
+tall.data %<>% mutate(type = interaction(condition, section))
+# "B.correct"   "C.correct"   "B.heuristic" "C.heuristic" "B.other"     "C.other"
+levels(tall.data$type) = c('Correct no-conflict', 'Correct conflict', 'Foil no-conflict',
+						   'Heuristic Conflict', 'Foil no-conflict', 'Foil conflict')
+tall.data$type %<>% factor(levels=levels(.)[c(1, 4, 2, 3, 5)])
+
+conflict$Section = conflict$section
+levels(conflict$Section) = c('Correct', 'Heuristic', 'Foil')
+levels(control$section) = c('Correct', 'Foil', 'Foil')
+
+# Define text sizes for plotting here, and resuse below
+my_theme = theme(title = element_text(size = rel(1)),
+                 axis.title = element_text(size = rel(1)),
+                 axis.text = element_text(size = rel(.9)),
+                 legend.title = element_text(size = rel(.9)),
+                 legend.text = element_text(size = rel(.9)),
+				 legend.background = element_rect(fill=NA))
+```
+
+# All responses
+
+Combining both conditions
+
+```{r all.plot, dev=fig_format, fig.width=9, fig.height=5}
+g = ggplot(tall.data,
+     aes(seconds, value, color=type, alpha=type)) +
+	stat_summary(fun.data=mean_se) +
+	theme_bw() + 
+  scale_color_manual(values=c(blue2, red, green, blue, black)) +
+	scale_alpha_manual(values=c(1, 1, 1, .5, .5)) +
+	labs(x="Seconds", y="Proportion of trials", colour="Response region", alpha="Response region") + 
+	scale_y_continuous(labels=percent) +
+	scale_x_continuous(breaks=seq(0, 60, 5)) +
+	coord_cartesian(ylim=c(0,.92)) +
+	my_theme
+``` 
+
+
+```{r all.plot.annotate, dev=fig_format, fig.width=9, fig.height=5}
+g + 
+  annotate('text', x=60, y=.83, label='Correct no-conflict',
+           color=blue2, size=6, hjust=1) +
+  annotate('text', x=60, y=.645, label='Heuristic conflict',
+           color=red, size=6, hjust=1) +
+  annotate('text', x=60, y=.39, label='Correct conflict',
+           color=green, size=6, hjust=1) +
+  annotate('text', x=60, y=.115, label='Foil no-conflict',
+           color=blue, size=6, hjust=1) +
+  annotate('text', x=60, y=0, label='Foil conflict',
+           color=black, size=6, hjust=1) +
+  theme(legend.position="none")
+```
+
+The following plots show the same data, but separately for conflict and no-conflict conditions.
+These are not included in the paper.
+
+
+# To Chosen Response
+
+Includes correct responsees to no-conflict trials)
+
+Note that for computational reasons the fitted curves shown are from a model without any random effects.
+
+```{r all.to_chosen, dev=fig_format, fig.width=9, fig.height=5}
+this.data = dplyr::filter(tall.data,
+						  choice=='correct' |
+						  	(condition=='C' & choice=='heuristic'))
+this.data = this.data[this.data$to.chosen,]
+this.data$type = interaction(this.data$condition, this.data$choice) %>%
+	droplevels
+levels(this.data$type) = c('Correct no-conflict', 'Correct conflict',
+						   'Heuristic conflict')
+this.data$type %<>% factor(levels = levels(.)[c(3,1,2)])
+
+g = this.data %>%
+	ggplot(aes(seconds, value, color=type)) +
+	stat_summary(fun.data=mean_se) +
+  labs(
+		 x="Seconds", y="Proportion of trials", colour="Response region") + 
+	theme_bw() +
+	scale_color_manual(values=c(red, blue2, green)) +
+	my_theme + scale_y_continuous(labels=percent, breaks=seq(.25, 1.01, .25)) +
+	theme(legend.position=c(1,0), legend.justification=c(1,0)) +
+	scale_x_continuous(breaks=seq(0, 60, 5))
+
+# For plotting, fit a standard model.
+# Fitted values are the same as from the multilevel model,
+# but it's not tricky, and hugely time consuming, to fit a proper multilevel model
+# comparing all three kinds of trial.
+correct.plot.model = glm(value ~ nt1 + nt2 + nt3 + type:(nt1 + nt2 + nt3),
+						 data=this.data, family=binomial)
+
+g = g + 
+  stat_summary( aes(x=seconds, y=fitted(correct.plot.model),
+                    group=type, color=type),
+                fun.y=mean, geom="line", size=1, alpha=.8)
+```
+
+```{r all.to_chosen.annotate, dev=fig_format, fig.width=9, fig.height=5}
+g + 
+  annotate('text', x=17.5, y=.775, label='Heuristic conflict',
+           color=red, size=6, hjust=1) +
+  annotate('text', x=28, y=.65, label='Correct no-conflict',
+           color=blue2, size=6, hjust=0) +
+  geom_segment(x=27.5, y=.65, xend=20.5, yend=.7,
+               size = 1.2, color=black,
+               arrow = arrow(length = unit(.3,"cm"))) +
+  annotate('text', x=22.6, y=.525, label='Correct conflict',
+           color=green, size=6, hjust=0) +
+  theme(legend.position="none")
+```
+
+
+## Models
+
+```{r all.to_chosen.fit,, results='asis', fig.width=9, fig.height=5}
+# Next, compare Heuristic conflict, and Correct no-conflict curves
+intuitive.d = filter(this.data,
+					 (choice=='correct' & condition=='B') |
+					 	(choice=='heuristic' & condition=='C'))
+intuitive.d$type %<>% droplevels
+contrasts(intuitive.d$type) = c(-.5, .5)
+
+if(recalculate_everything | !file.exists('cache/intuitive.chosen.glme1.rds')){
+	# Null model
+	intuitive.chosen.glme0 = glmer(value ~ nt1 + nt2 + nt3 + (nt1-1|subject_nr),
+								   data=intuitive.d, family=binomial,
+								   control = glmerControl(optimizer = "nloptwrap", calc.derivs = FALSE))
+	# Difference between curves?
+	intuitive.chosen.glme1 = glmer(value ~ nt1 + nt2 + nt3 + type:(nt1+nt2+nt3) + (nt1-1|subject_nr),
+								   data=intuitive.d, family=binomial,
+								   control = glmerControl(optimizer = "nloptwrap", calc.derivs = FALSE))
+	saveRDS(intuitive.chosen.glme0, 'cache/intuitive.chosen.glme0.rds')
+	saveRDS(intuitive.chosen.glme1, 'cache/intuitive.chosen.glme1.rds')
+} else {
+	intuitive.chosen.glme0 = readRDS('cache/intuitive.chosen.glme0.rds')
+	intuitive.chosen.glme1 = readRDS('cache/intuitive.chosen.glme1.rds')
+}
+
+anova.table(intuitive.chosen.glme0, intuitive.chosen.glme1)
+coef.table(intuitive.chosen.glme1)
+```
+
+
+```{r intuitive.to_chosen.plot, dev=fig_format, fig.width=9, fig.height=5}
+intuitive.to_chosen.plot = ggplot(intuitive.d, aes(seconds, value, color=type)) +
+	stat_summary(fun.data=mean_se) +
+	stat_summary(aes(x=seconds, y=fitted(intuitive.chosen.glme1), group=type, color=type),
+				 fun.y=mean, geom="line", size=1.5, alpha=1) +
+  labs(
+	# labs(title="To chosen response",
+		 x="Seconds", y="Proportion of trials", colour="Response region") + 
+	theme_bw() +
+	scale_color_manual(values=c(red, blue2)) +
+	my_theme + scale_y_continuous(labels=percent, breaks=seq(.25, 1.01, .25)) +
+	theme(legend.position=c(1,0), legend.justification=c(1,0)) +
+	scale_x_continuous(breaks=seq(0, 60, 5))
+intuitive.to_chosen.plot
+```
+
+```{r}
+rm(intuitive.chosen.glme0)
+rm(intuitive.chosen.glme1)
+```
+
+## To Chosen Response (conflict)
+
+```{r conflict.to_chosen, dev=fig_format, fig.width=9, fig.height=5}
+conflict.d = filter(this.data, condition=='C' & choice!='other')
+conflict.d$section %<>% droplevels
+conflict.d$Section = conflict.d$section
+levels(conflict.d$Section) = c('Correct conflict', 'Heuristic conflict')
+
+contrasts(conflict.d$Section) = c(-.5, .5)
+```
+
+
+```{r conflict.to_chosen.fit, results='asis', fig.width=9, fig.height=5}
+if(recalculate_everything | !file.exists('cache/conflict.glme.biased_reasoners.1.rds')){
+	# Null
+	conflict.chosen.glme0 = glmer(value ~ nt1 + nt2 + nt3 + (nt1-1|subject_nr),
+								  data=conflict.d, family=binomial,
+								  control = glmerControl(optimizer = "nloptwrap", calc.derivs = FALSE))
+	
+	# Difference between curves?
+	conflict.chosen.glme1 = glmer(value ~ nt1 + nt2 + nt3 + section:(nt1+nt2+nt3) + (nt1-1|subject_nr),
+								  data=conflict.d, family=binomial,
+								  control = glmerControl(optimizer = "nloptwrap", calc.derivs = FALSE))
+	saveRDS(conflict.chosen.glme0, 'cache/conflict.chosen.glme0.rds')
+	saveRDS(conflict.chosen.glme1, 'cache/conflict.chosen.glme1.rds')
+} else {
+	conflict.chosen.glme0 = readRDS('cache/conflict.chosen.glme0.rds')
+	conflict.chosen.glme1 = readRDS('cache/conflict.chosen.glme1.rds')
+}
+anova.table(conflict.chosen.glme0, conflict.chosen.glme1)
+coef.table(conflict.chosen.glme1)
+```
+
+
+```{r conflict.to_chosen.plot, dev=fig_format, fig.width=9, fig.height=5}
+conflict.to_chosen.plot = ggplot(conflict.d, aes(seconds, value, color=type)) +
+	stat_summary(fun.data=mean_se) +
+	stat_summary(aes(x=seconds, y=fitted(conflict.chosen.glme1), group=type, color=type),
+				 fun.y=mean, geom="line", size=1.5, alpha=1) +
+	labs(
+  # labs(title="Unbiased reasoners - To chosen response",
+		 x="Seconds", y="Proportion of trials", colour="Response region") + 
+	theme_bw() +
+	scale_color_manual(values=c(red, green)) +
+	my_theme + scale_y_continuous(labels=percent, breaks=seq(.25, 1.01, .25)) +
+	theme(legend.position=c(1,0), legend.justification=c(1,0)) +
+	scale_x_continuous(breaks=seq(0, 60, 5))
+conflict.to_chosen.plot
+```
+
+```{r}
+rm(conflict.chosen.glme0)
+rm(conflict.chosen.glme1)
+```
+
+
+# To non-chosen response
+	
+```{r dev=fig_format, fig.width=9, fig.height=9}
+not.chosen = conflict[conflict$to.chosen==F,]
+not.chosen = not.chosen[not.chosen$choice!='other',]
+ 
+correct.choices = not.chosen[not.chosen$choice=='correct',]
+```
+
+## Correct choices
+
+## Model
+
+```{r correct.not_chosen.fit, dev=fig_format, results='asis'}
+# contrasts(correct.choices$Section)
+if(recalculate_everything | !file.exists('cache/notchosen.correct.glme0.rds')){
+	# Null model
+	notchosen.correct.glme0 = glmer(value ~ nt1 + nt2 + nt3 +
+										(nt1-1|subject_nr),
+			  data=correct.choices, family=binomial,
+			  control = glmerControl(optimizer = "nloptwrap", calc.derivs = FALSE))
+	
+	# Difference between curves
+	notchosen.correct.glme1 = glmer(value ~ nt1 + nt2 + nt3 + Section:(nt1+nt2+nt3) +
+										(nt1-1|subject_nr),
+			  data=correct.choices, family=binomial,
+			  control = glmerControl(optimizer = "nloptwrap", calc.derivs = FALSE))
+	
+	saveRDS(notchosen.correct.glme0,
+	        'notchosen.correct.glme0.rds')
+	saveRDS(notchosen.correct.glme1,
+	        'notchosen.correct.glme1.rds')
+} else {
+	notchosen.correct.glme0 = readRDS('cache/notchosen.correct.glme0.rds')
+	notchosen.correct.glme1 = readRDS('cache/notchosen.correct.glme1.rds')
+}
+
+# Sig. diff between the lines
+anova.table(notchosen.correct.glme0, notchosen.correct.glme1)
+# Sig. diff on time, time^2, and time^3
+coef.table(notchosen.correct.glme1)
+```
+
+```{r correct.not_chosen.plot, dev=fig_format, fig.width=9, fig.height=5}
+correct.not_chosen.plot = ggplot(correct.choices,
+				   aes(seconds, value, color=Section)) +
+	stat_summary(fun.data=mean_se) +
+  labs(
+	# labs(title="To non-chosen response\n(when chosing correct one)",
+		 x="Seconds", y="Proportion of trials", color="Response region") + 
+	theme_bw() +
+	scale_color_manual(values=c(red, blue)) +
+	scale_y_continuous(labels=percent) +
+	scale_x_continuous(breaks=seq(0, 60, 5)) +
+	theme(legend.position=c(1,1), legend.justification=c(1,1)) +
+	my_theme +
+  stat_summary(aes(x=seconds, y=fitted(notchosen.correct.glme1), color=Section),
+               fun.y=mean, geom="line", size=1.5, alpha=1)
+```
+
+```{r correct.not_chosen.plot.annotate, dev=fig_format, fig.width=9, fig.height=5}
+correct.not_chosen.plot + 
+  annotate('text', x=39, y=.09, label='Heuristic option',
+           color=red, size=6, hjust=0, angle=0) +
+  annotate('text', x=28, y=.045, label='Correct option',
+           color=blue, size=6, hjust=1, angle=0) +
+  theme(legend.position="none")
+```
+
+
+
+```{r}
+rm(notchosen.correct.glme0)
+rm(notchosen.correct.glme1)
+```
+
+## Heuristic choices
+
+```{r heuristic.not_chosen, dev=fig_format, fig.width=9, fig.height=5}
+heuristic.choices = not.chosen[not.chosen$choice=='heuristic',]
+```
+
+```{r, results='asis'}
+# contrasts(correct.choices$Section)
+if(recalculate_everything | !file.exists('cache/notchosen.heuristic.glme0.rds')){
+	# Null model
+	notchosen.heuristic.glme0 = glmer(value ~ nt1 + nt2 + nt3 +
+										(nt1-1|subject_nr),
+			  data=heuristic.choices, family=binomial,
+			  control = glmerControl(optimizer = "nloptwrap", calc.derivs = FALSE))
+	
+	# Difference between curves
+	notchosen.heuristic.glme1 = glmer(value ~ nt1 + nt2 + nt3 + Section:(nt1+nt2+nt3) +
+										(nt1-1|subject_nr),
+			  data=heuristic.choices, family=binomial,
+			  control = glmerControl(optimizer = "nloptwrap", calc.derivs = FALSE))
+	
+	saveRDS(notchosen.heuristic.glme0, 'cache/notchosen.heuristic.glme0.rds')
+	saveRDS(notchosen.heuristic.glme1, 'cache/notchosen.heuristic.glme1.rds')
+} else {
+	notchosen.heuristic.glme0 = readRDS('cache/notchosen.heuristic.glme0.rds')
+	notchosen.heuristic.glme1 = readRDS('cache/notchosen.heuristic.glme1.rds')
+}
+	
+# Difference between the curves	
+anova.table(notchosen.heuristic.glme0, notchosen.heuristic.glme1)
+# Sig. on every term
+coef.table(notchosen.heuristic.glme1)
+```
+
+```{r heuristic.not_chosen.plot, dev=fig_format, fig.width=9, fig.height=5}
+heuristic.not_chosen.plot = ggplot(heuristic.choices,
+					 aes(seconds, value, color=Section)) +
+	stat_summary(fun.data=mean_se) +
+  labs(
+	# labs(title="To non-chosen response\n(when chosing heuristic one)",
+		 x="Seconds", y="Proportion of trials", color="Response region") + 
+	theme_bw() +
+	scale_color_manual(values=c(green, blue)) +
+	theme(legend.position=c(1,1), legend.justification=c(1,1)) +
+	my_theme + scale_y_continuous(labels=percent) + 
+  stat_summary(aes(x=seconds, y=fitted(notchosen.heuristic.glme1), color=Section),
+               fun.y=mean, geom="line", size=1.5, alpha=1)
+```
+
+```{r heuristic.not_chosen.plot.annotate, dev=fig_format, fig.width=9, fig.height=5}
+heuristic.not_chosen.plot + 
+  annotate('text', x=13, y=.175, label='Foil option',
+           color=blue, size=6, hjust=0, angle=0) +
+  annotate('text', x=12, y=.09, label='Correct option',
+           color=green, size=6, hjust=1, angle=0) +
+  theme(legend.position="none")
+```
